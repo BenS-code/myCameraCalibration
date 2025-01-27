@@ -79,22 +79,24 @@ class CameraCalibrator:
     def display_axis(self, image_path, index):
         # Display 3D axis on the image
         img = cv.imread(image_path)
-        
-        # Use stored corners
-        corners2 = self.corners_list[index]
-        
-        # Use pre-calculated rvecs and tvecs
-        rvec = self.rvecs[index]
-        tvec = self.tvecs[index]
-        
-        # Project 3D points to image plane
-        axis_length = self.square_size * 3  # Length of the axis arrows
-        axis = np.float32([[axis_length,0,0], [0,axis_length,0], [0,0,-axis_length]]).reshape(-1,3)
-        imgpts, _ = cv.projectPoints(axis, rvec, tvec, self.mtx, self.dist)
-        
-        img = self.draw_axis(img, corners2, imgpts)
-        cv.imshow('img', img)
-        cv.waitKey(100)
+        try:
+            # Use stored corners
+            corners2 = self.corners_list[index]
+            
+            # Use pre-calculated rvecs and tvecs
+            rvec = self.rvecs[index]
+            tvec = self.tvecs[index]
+            
+            # Project 3D points to image plane
+            axis_length = self.square_size * 3  # Length of the axis arrows
+            axis = np.float32([[axis_length,0,0], [0,axis_length,0], [0,0,-axis_length]]).reshape(-1,3)
+            imgpts, _ = cv.projectPoints(axis, rvec, tvec, self.mtx, self.dist)
+            
+            img = self.draw_axis(img, corners2, imgpts)
+            cv.imshow('img', img)
+            cv.waitKey(100)
+        except:
+            pass
 
     def plot_camera_and_image_planes(self, image_size):
         fig = plt.figure(figsize=(12, 9))
@@ -153,7 +155,9 @@ class CameraCalibrator:
 
 def main():
     # Main function to run the camera calibration process
-    images_path = "cam1_images/"
+    images_root_path = "CameraData/"
+    images_path = images_root_path + "camera_imu_calibration_data_images/"
+    file_type = "*.png" #"*.jpg"
     results_path = "results/"
 
     # Check if directories exist, if not create them
@@ -165,13 +169,14 @@ def main():
             # print(f"Directory already exists: {path}")
             pass
 
-    rows = 6
-    cols = 9
+    rows = 7
+    cols = 10
     square_size = 25.0  # Size of a square in millimeters (adjust as needed)
     
     calibrator = CameraCalibrator(rows, cols, square_size)
     
-    images = glob.glob(images_path + '*.jpg')
+    images = glob.glob(images_path + file_type)
+    images = images[:12] # limit number of images in dataset
     image_size = None
     print('Finding chessboard corners...')
     for fname in images:
