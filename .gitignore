@@ -75,4 +75,7 @@ yarn-error.log*
 
 #directories
 results/
-CameraData
+CameraData/RV/
+CameraData/camera_imu_calibration_data_images/
+CameraData/cam1_images/
+CameraData/cam2_images/
