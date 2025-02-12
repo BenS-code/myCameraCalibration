@@ -160,34 +160,39 @@ class CameraCalibrator:
         ])
         ax.plot(image_corners[:, 0], image_corners[:, 1], image_corners[:, 2], 'k-', label='Image Plane')
 
+        # Create chessboard corners
+        board_size_x, board_size_y = (self.cols + 1) * self.square_size, (self.rows + 1) * self.square_size
+        board_corners = np.array([
+            [-self.square_size, -self.square_size, 0],
+            [board_size_x - self.square_size, -self.square_size, 0],
+            [board_size_x - self.square_size, board_size_y - self.square_size, 0],
+            [-self.square_size, board_size_y - self.square_size, 0],
+            [-self.square_size, -self.square_size, 0]
+        ])
+
+        print(f"\nBoard size: ({board_size_x, board_size_y}) mm")
+
         # Plot chessboard planes
         colors = plt.cm.rainbow(np.linspace(0, 1, len(self.rvecs)))
         for rvec, tvec, color, label in zip(self.rvecs, self.tvecs, colors, self.img_list):
             label = label[label.rfind("/")+1:label.rfind(".")]
-            R, _ = cv2.Rodrigues(rvec)
-            R = R.T  # Transpose for numpy multiplication
-            t = -R @ tvec.reshape(3, 1)
-            
-            # Create chessboard corners
-            board_size_x, board_size_y = (self.cols - 1) * self.square_size, (self.rows - 1) * self.square_size
-            board_corners = np.array([
-                [0, 0, 0],
-                [board_size_x, 0, 0],
-                [board_size_x, board_size_y, 0],
-                [0, board_size_y, 0],
-                [0, 0, 0]
-            ])
+            R, _ = cv2.Rodrigues(rvec)     
             
             # Transform corners to camera coordinate system
-            transformed_corners = (R @ board_corners.T + t).T
-            
-            # Plot the transformed chessboard
-            ax.plot(transformed_corners[:, 0], transformed_corners[:, 1], transformed_corners[:, 2], 
-                    color=color, alpha=0.5)
-            ax.text(transformed_corners[0][0], transformed_corners[0][1], transformed_corners[0][2],
+            transformed_corners = np.dot(R, self.objp.T).T + tvec.T
+            transformed_board_corners = np.dot(R, board_corners.T).T + tvec.T
+
+            # Plot the transformed corners
+            ax.scatter(transformed_corners[:, 0], transformed_corners[:, 1], transformed_corners[:, 2], 
+                    s=1, color=color, alpha=0.5)
+            ax.text(transformed_corners[self.cols-1][0], transformed_corners[self.cols-1][1], transformed_corners[self.cols-1][2],
                     label,
                     fontsize=8,
                     color=color)
+
+            # Plot the transformed chessboard corners
+            ax.plot(transformed_board_corners[:, 0], transformed_board_corners[:, 1], transformed_board_corners[:, 2], 
+                    color=color, alpha=0.5)
 
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
@@ -220,7 +225,7 @@ def main():
     rows = 7 # number of corners in a arow
     cols = 10 # number of corners in a column
     square_size = 20.0  # Size of a square in millimeters
-    scale_factor = 1 # scale the image
+    scale_factor = 1.0 # scale the image
     pixel_size_x = 3.72  # pixel size in the x-direction in microns
     pixel_size_y = 3.72  # pixel size in the y-direction in microns
     
@@ -247,6 +252,12 @@ def main():
 
     total_error = calibrator.calculate_error()
     print(f"Total error: {total_error}")
+
+    print(f"\nCamera extrinsics:")
+    for i in range(len(calibrator.tvecs)):
+        print(f"File name: {calibrator.img_list[i]}")
+        print(f"Translation: {calibrator.tvecs[i].flatten()}")
+        print(f"Rotation: {calibrator.rvecs[i].flatten()}\n")
 
     # Undistort images
     print('\nUndistorting images...')
