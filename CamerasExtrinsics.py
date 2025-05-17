@@ -22,10 +22,8 @@ class CameraCalibrator:
         return objp
 
     def _preprocess(self, img):
-        # 2. Apply binary threshold
-        _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
-        # 3. Invert the binary image
-        inverted = cv2.bitwise_not(binary)  # or: inverted = 255 - binary
+        # Invert the binary image
+        inverted = cv2.bitwise_not(img)  # or: inverted = 255 - binary
         return inverted
 
     def _robust_find_corners(self, gray):
@@ -84,11 +82,26 @@ class CameraCalibrator:
             else:
                 print(f"Pattern not found in {fname}")
 
-    def calibrate(self):
+    def calibrate(self, known_intrinsic=None):
         if not self.objpoints or not self.imgpoints:
             raise ValueError("No image points or object points found.")
+        
+        # If a known intrinsic matrix is provided, use it and fix intrinsics during calibration
+        if known_intrinsic is not None:
+            flags = cv2.CALIB_FIX_FOCAL_LENGTH | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO
+            camera_matrix = np.array(known_intrinsic, dtype=np.float64)
+        else:
+            flags = 0
+            camera_matrix = None
+
         ret, self.camera_matrix, self.dist_coeffs, self.rvecs, self.tvecs = cv2.calibrateCamera(
-            self.objpoints, self.imgpoints, self.image_shape, None, None)
+            self.objpoints,
+            self.imgpoints,
+            self.image_shape,
+            camera_matrix,
+            None,
+            flags=flags
+        )
         print(f"Calibration RMS error: {ret}")
         print(f"Camera Matrix:\n{self.camera_matrix}")
         print(f"Distortion Coefficients:\n{self.dist_coeffs}")
@@ -171,30 +184,111 @@ def compute_relative_extrinsics(rvec1, tvec1, rvec2, tvec2):
     rvec_rel, _ = cv2.Rodrigues(R_rel)
     return rvec_rel, t_rel
 
+def average_rvecs(rvecs):
+        # Convert all rvecs to rotation matrices
+        R_matrices = [cv2.Rodrigues(rvec)[0] for rvec in rvecs]
+        # Average the rotation matrices using Singular Value Decomposition (SVD)
+        R_avg = np.mean(R_matrices, axis=0)
+        # Re-orthogonalize using SVD
+        U, _, Vt = np.linalg.svd(R_avg)
+        R_avg = U @ Vt
+        # Convert back to rvec
+        rvec_avg, _ = cv2.Rodrigues(R_avg)
+        return rvec_avg
+
+def average_tvecs(tvecs):
+    return np.mean(np.array(tvecs), axis=0)
+
+def rvec_to_yaw_pitch_roll(rvec):
+    # Convert rotation vector to rotation matrix
+    R, _ = cv2.Rodrigues(rvec)
+    
+    # Extract Euler angles from rotation matrix
+    # Using the ZYX convention: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    sy = np.sqrt(R[0,0]**2 + R[1,0]**2)
+    
+    singular = sy < 1e-6
+
+    if not singular:
+        yaw = np.arctan2(R[1,0], R[0,0])
+        pitch = np.arctan2(-R[2,0], sy)
+        roll = np.arctan2(R[2,1], R[2,2])
+    else:
+        # Gimbal lock case
+        yaw = np.arctan2(-R[1,2], R[1,1])
+        pitch = np.arctan2(-R[2,0], sy)
+        roll = 0
+
+    # Convert radians to degrees for readability
+    yaw_deg = np.degrees(yaw)
+    pitch_deg = np.degrees(pitch)
+    roll_deg = np.degrees(roll)
+
+    return yaw_deg, pitch_deg, roll_deg
+
 if __name__ == "__main__":
     # Adjust pattern_size to your grid (columns, rows)
     pattern_size = (5, 4)  # circular grid
 
+    focal_length_1 = 50e-3
+    pixel_size_1 = 9.3e-6
+    resolution_x_1 = 3840
+    resolution_y_1 = 2160
+
+    focal_length_2 = 50e-3
+    pixel_size_2 = 17e-6
+    resolution_x_2 = 1028
+    resolution_y_2 = 768
+
+    # Calculate focal lengths in pixels
+    fx1 = focal_length_1 / pixel_size_1
+    fy1 = focal_length_1 / pixel_size_1
+    cx1 = resolution_x_1 / 2
+    cy1 = resolution_y_1 / 2
+
+    fx2 = focal_length_2 / pixel_size_2
+    fy2 = focal_length_2 / pixel_size_2
+    cx2 = resolution_x_2 / 2
+    cy2 = resolution_y_2 / 2
+
+    intrinsics1 = np.array([
+        [fx1,    0, cx1],
+        [   0, fy1, cy1],
+        [   0,    0,   1]
+    ])
+
+    intrinsics2 = np.array([
+        [fx2,    0, cx2],
+        [   0, fy2, cy2],
+        [   0,    0,   1]
+    ])
+
     # Calibrate first camera
     cam1 = CameraCalibrator("CameraData/SyncedCollimatorImages/VIS/", pattern_size, pattern_type='circle')
     cam1.find_image_points(visualize=True)
-    cam1.calibrate()
+    cam1.calibrate(intrinsics1)
 
     # Calibrate second camera
     cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR/", pattern_size, pattern_type='circle')
     cam2.find_image_points(visualize=True)
-    cam2.calibrate()
+    cam2.calibrate(intrinsics2)
 
-    # Use the first view for each camera for extrinsic estimation
-    rvec1, tvec1 = cam1.rvecs[0], cam1.tvecs[0]
-    rvec2, tvec2 = cam2.rvecs[0], cam2.tvecs[0]
+    # Average all rvecs and tvecs for each camera
+    rvec1_avg = average_rvecs(cam1.rvecs)
+    tvec1_avg = average_tvecs(cam1.tvecs)
+    rvec2_avg = average_rvecs(cam2.rvecs)
+    tvec2_avg = average_tvecs(cam2.tvecs)
 
-    rvec_rel, t_rel = compute_relative_extrinsics(rvec1, tvec1, rvec2, tvec2)
+    # Compute relative extrinsics using the averaged values
+    rvec_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
     print("Relative Rotation Vector (rvec):\n", rvec_rel)
+    yaw_deg, pitch_deg, roll_deg = rvec_to_yaw_pitch_roll(rvec_rel)
+    print(f"Yaw: {yaw_deg:.2f}°, Pitch: {pitch_deg:.2f}°, Roll: {roll_deg:.2f}°")
+
     print("Relative Translation Vector (tvec):\n", t_rel)
 
     # Reproject points from cam1 to cam2 and visualize
     reprojector = CameraReprojector(cam1, cam2)
-    for i in range(0,2):
+    for i in range(0,len(cam1.imgpoints)):
         reprojector.reproject_points_cam1tocam2(idx=i, show=True)
         reprojector.reproject_points_cam2tocam1(idx=i, show=True)
