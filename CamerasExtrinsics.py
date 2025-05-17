@@ -88,7 +88,7 @@ class CameraCalibrator:
         
         # If a known intrinsic matrix is provided, use it and fix intrinsics during calibration
         if known_intrinsic is not None:
-            flags = cv2.CALIB_FIX_FOCAL_LENGTH | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO
+            flags = cv2.CALIB_FIX_FOCAL_LENGTH | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO | cv2.CALIB_FIX_INTRINSIC
             camera_matrix = np.array(known_intrinsic, dtype=np.float64)
         else:
             flags = 0
@@ -236,9 +236,9 @@ if __name__ == "__main__":
     resolution_y_1 = 2160
 
     focal_length_2 = 50e-3
-    pixel_size_2 = 17e-6
-    resolution_x_2 = 1028
-    resolution_y_2 = 768
+    pixel_size_2 = 6.044e-6 # 17e-6
+    resolution_x_2 = 3840 # 1028
+    resolution_y_2 = 2160 # 768
 
     # Calculate focal lengths in pixels
     fx1 = focal_length_1 / pixel_size_1
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     cam1.calibrate(intrinsics1)
 
     # Calibrate second camera
-    cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR/", pattern_size, pattern_type='circle')
+    cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR4K/", pattern_size, pattern_type='circle')
     cam2.find_image_points(visualize=True)
     cam2.calibrate(intrinsics2)
 
