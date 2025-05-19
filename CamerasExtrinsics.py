@@ -3,6 +3,8 @@ import numpy as np
 import glob
 import os
 from scipy.spatial.transform import Rotation as R
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
 
 class CameraCalibrator:
     def __init__(self, image_dir, pattern_size, pattern_spacing, pattern_type='circle'):
@@ -304,7 +306,7 @@ def stereo_calibrate(
         E: Essential matrix
         F: Fundamental matrix
     """
-    flags = cv2.CALIB_FIX_INTRINSIC  # Use this if intrinsics are known/fixed
+    flags = cv2.CALIB_FIX_INTRINSIC # Use this if intrinsics are known/fixed
 
     retval, cameraMatrix1, distCoeffs1, cameraMatrix2, distCoeffs2, \
     R, T, E, F = cv2.stereoCalibrate(
@@ -322,6 +324,148 @@ def stereo_calibrate(
 
     return retval, R, T, E, F
 
+def normalize_points(points, K):
+    # Ensure points is a 2D NumPy array
+    points = np.asarray(points)
+    if points.ndim == 1:
+        points = points.reshape(1, -1)  # Convert single point to (1, D)
+    
+    K_inv = np.linalg.inv(K)
+    points_h = np.hstack([points, np.ones((points.shape[0], 1))])
+    norm_points = (K_inv @ points_h.T).T
+    return norm_points[:, :2] / norm_points[:, 2][:, None]
+
+def arun_method(X1, X2):
+    """
+    X1: Nx3 array of 3D points in camera 1 coordinates
+    X2: Nx3 array of corresponding 3D points in camera 2 coordinates
+    Returns:
+        R: 3x3 rotation matrix
+        T: 3x1 translation vector
+    """
+    assert X1.shape == X2.shape
+
+    # Compute centroids
+    centroid_X1 = np.mean(X1, axis=0)
+    centroid_X2 = np.mean(X2, axis=0)
+
+    # Center the points
+    Q1 = X1 - centroid_X1
+    Q2 = X2 - centroid_X2
+
+    # Cross-covariance matrix
+    H = Q1.T @ Q2
+
+    # SVD
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+
+    # Ensure a proper rotation (no reflection)
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    # Translation
+    T = centroid_X2 - R @ centroid_X1
+
+    return R, T
+
+def arun_similarity_transform(X1, X2):
+    """
+    Estimate scale, rotation, and translation to align X1 to X2.
+    X1: (N, 3) array of 3D points in the first camera's frame
+    X2: (N, 3) array of corresponding 3D points in the second camera's frame
+
+    Returns:
+        s: scale factor (float)
+        R: (3, 3) rotation matrix
+        T: (3,) translation vector
+    """
+    assert X1.shape == X2.shape
+    N = X1.shape[0]
+
+    # 1. Compute centroids
+    centroid_X1 = np.mean(X1, axis=0)
+    centroid_X2 = np.mean(X2, axis=0)
+
+    # 2. Center the points
+    Q1 = X1 - centroid_X1
+    Q2 = X2 - centroid_X2
+
+    # 3. Compute cross-covariance matrix
+    H = Q1.T @ Q2
+
+    # 4. SVD
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+
+    # 5. Ensure a proper rotation (no reflection)
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    # 6. Compute scale
+    var1 = np.sum(Q1 ** 2)
+    s = np.sum(S) / var1
+
+    # 7. Compute translation
+    T = centroid_X2 - s * R @ centroid_X1
+
+    return s, R, T
+
+def extract_angles_from_arun(R_arun, t_arun):
+    # Extract rotation angle from 2D rotation matrix
+    roll = np.arctan2(R_arun[1, 0], R_arun[0, 0])
+    # Custom yaw and pitch from translation vector
+    yaw = np.arcsin(np.clip(t_arun[0], -1.0, 1.0))
+    pitch = np.arcsin(np.clip(t_arun[1], -1.0, 1.0))
+    return roll, yaw, pitch
+
+def visualize_alignment(X1, X2, s, R, T):
+    # Transform X1 to X2 frame
+    X1_aligned = (s * (R @ X1.T)).T + T
+
+    plt.figure()
+    plt.scatter(X1[:, 0], X1[:, 1], c='b', label='X1 (original)', alpha=0.5)
+    plt.scatter(X1_aligned[:, 0], X1_aligned[:, 1], c='g', marker='^', label='X1 (aligned)')
+    plt.scatter(X2[:, 0], X2[:, 1], c='r', label='X2 (target)', alpha=0.5)
+    plt.legend()
+    plt.title('2D Point Alignment')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.axis('equal')
+    plt.show()
+
+def euler_to_rotation_matrix(yaw, pitch, roll):
+    """
+    Convert yaw, pitch, roll (in radians) to a 3x3 rotation matrix using ZYX convention.
+    """
+    cy = np.cos(yaw)
+    sy = np.sin(yaw)
+    cp = np.cos(pitch)
+    sp = np.sin(pitch)
+    cr = np.cos(roll)
+    sr = np.sin(roll)
+
+    Rz = np.array([
+        [cy, -sy, 0],
+        [sy,  cy, 0],
+        [ 0,   0, 1]
+    ])
+    Ry = np.array([
+        [cp, 0, sp],
+        [ 0, 1,  0],
+        [-sp, 0, cp]
+    ])
+    Rx = np.array([
+        [1,  0,   0],
+        [0, cr, -sr],
+        [0, sr,  cr]
+    ])
+
+    # Note: The order is Rz * Ry * Rx (ZYX)
+    R = Rz @ Ry @ Rx
+    return R
 
 def average_tvecs(tvecs):
     return np.mean(np.array(tvecs), axis=0)
@@ -401,19 +545,40 @@ if __name__ == "__main__":
     cam2.find_image_points(visualize=False)
     cam2.calibrate(intrinsics2)
 
-    ## Average all rvecs and tvecs for each camera
-    # rvec1_avg = average_rvecs(cam1.rvecs)
-    # tvec1_avg = average_tvecs(cam1.tvecs)
-    # rvec2_avg = average_rvecs(cam2.rvecs)
-    # tvec2_avg = average_tvecs(cam2.tvecs)
+    ################################################################################
+    # Average all rvecs and tvecs for each camera
+    rvec1_avg = average_rvecs(cam1.rvecs)
+    tvec1_avg = average_tvecs(cam1.tvecs)
+    rvec2_avg = average_rvecs(cam2.rvecs)
+    tvec2_avg = average_tvecs(cam2.tvecs)
 
-    ## Compute relative extrinsics using the averaged values
-    # rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+    # Compute relative extrinsics using the averaged values
+    rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+    #####################################################################################################
 
-    retval, R_rel, t_rel, E, F = stereo_calibrate(cam1.objpoints, cam1.imgpoints, cam2.imgpoints,
-                                          cam1.camera_matrix, cam1.dist_coeffs, cam2.camera_matrix,cam2.dist_coeffs, (3840, 2160))
+    # retval, R_rel, t_rel, E, F = stereo_calibrate(cam1.objpoints, cam1.imgpoints, cam2.imgpoints,
+    #                                       cam1.camera_matrix, cam1.dist_coeffs, cam2.camera_matrix,cam2.dist_coeffs, (3840, 2160))
+
+    ###########################################################################
+    # cam1_first_points = np.array([arr[0, 0] for arr in cam1.imgpoints])
+    # cam2_first_points = np.array([arr[0, 0] for arr in cam2.imgpoints])
+
+    # cam1_norm_point = normalize_points(cam1_first_points, cam1.camera_matrix)
+    # cam2_norm_point = normalize_points(cam2_first_points, cam2.camera_matrix)
+
+    # scale_arun, R_arun, t_arun = arun_similarity_transform(cam1_norm_point, cam2_norm_point)
+
+    # roll, yaw, pitch = extract_angles_from_arun(R_arun, t_arun)
+
+    # R_rel = euler_to_rotation_matrix(yaw, pitch, roll)
+    # t_rel = np.array([-0.05, 0.05, -0.05])
+
+    # visualize_alignment(cam1_norm_point, cam2_norm_point, scale_arun, R_arun, t_arun)
+    #######################################################################################
+
     rvec_rel, _ = cv2.Rodrigues(R_rel)
-    print("Stereo RMS error:", retval)
+
+    # print("Stereo RMS error:", retval)
     print("Rotation matrix:\n", R_rel)
     print("Translation vector:\n", t_rel)
 
