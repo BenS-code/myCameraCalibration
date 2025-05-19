@@ -4,9 +4,10 @@ import glob
 import os
 
 class CameraCalibrator:
-    def __init__(self, image_dir, pattern_size, pattern_type='circle'):
+    def __init__(self, image_dir, pattern_size, pattern_spacing, pattern_type='circle'):
         self.image_dir = image_dir
         self.pattern_size = pattern_size  # (columns, rows)
+        self.pattern_spacing = pattern_spacing
         self.pattern_type = pattern_type
         self.objpoints = []
         self.imgpoints = []
@@ -18,7 +19,7 @@ class CameraCalibrator:
 
     def _get_object_points(self):
         objp = np.zeros((self.pattern_size[0]*self.pattern_size[1], 3), np.float32)
-        objp[:, :2] = np.mgrid[0:self.pattern_size[0], 0:self.pattern_size[1]].T.reshape(-1, 2)
+        objp[:, :2] = np.mgrid[0:self.pattern_size[0], 0:self.pattern_size[1]].T.reshape(-1, 2) * self.pattern_spacing
         return objp
 
     def _preprocess(self, img):
@@ -88,7 +89,8 @@ class CameraCalibrator:
         
         # If a known intrinsic matrix is provided, use it and fix intrinsics during calibration
         if known_intrinsic is not None:
-            flags = cv2.CALIB_FIX_FOCAL_LENGTH | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO | cv2.CALIB_FIX_INTRINSIC
+            flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_FOCAL_LENGTH |
+                    cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3 | cv2.CALIB_FIX_TANGENT_DIST)
             camera_matrix = np.array(known_intrinsic, dtype=np.float64)
         else:
             flags = 0
@@ -132,13 +134,13 @@ class CameraReprojector:
             h, w = img2.shape[:2]
             scale = min(desired_width / w, desired_height / h)
             if scale < 1:
-                img1_resized = cv2.resize(img2, (int(w * scale), int(h * scale)))
+                img2_resized = cv2.resize(img2, (int(w * scale), int(h * scale)))
             else:
-                img1_resized = img2
+                img2_resized = img2
             window_name = "Reprojected Points on Camera 2"
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window_name, desired_width, desired_height)
-            cv2.imshow(window_name, img1_resized)
+            cv2.imshow(window_name, img2_resized)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
         return imgpoints2_proj
@@ -176,13 +178,98 @@ class CameraReprojector:
 
         return imgpoints1_proj
 
+    def reproject_points_cam1tocam2_known_extrinsics(self, idx, points_3d_cam1, R_1to2, t_1to2, K2, show=True):
+        """
+        Reprojects 3D points from camera 1's coordinate system to camera 2's image plane,
+        using the extrinsics from cam1 to cam2.
+        
+        Args:
+            points_3d_cam1: (N, 3) array of 3D points in camera 1 coordinates
+            R_1to2: (3, 3) rotation matrix from cam1 to cam2
+            t_1to2: (3,) translation vector from cam1 to cam2
+            K2: (3, 3) intrinsic matrix of camera 2
+        
+        Returns:
+            points_2d_cam2: (N, 2) array of 2D points in camera 2 image coordinates
+        """
+        # Transform points from cam1 to cam2 coordinates
+        points_3d_cam2 = (R_1to2 @ points_3d_cam1.T) + t_1to2.reshape(3,1)  # shape (3, N)
+        # Project to cam2 image plane
+        points_2d_hom = K2 @ points_3d_cam2  # shape (3, N)
+        points_2d = (points_2d_hom[:2, :] / points_2d_hom[2, :]).T  # shape (N, 2)
+        cam2_images = sorted(glob.glob(os.path.join(self.cam2.image_dir, "*.jpg")) +
+                             glob.glob(os.path.join(self.cam2.image_dir, "*.png")))
+        img2 = cv2.imread(cam2_images[idx])
+        for proj_pt  in points_2d:
+            proj_pt = tuple(np.round(proj_pt).astype(int))
+            cv2.circle(img2, proj_pt, 5, (0, 0, 255), -1)
+        if show:
+            desired_width = 1600
+            desired_height = 900
+            h, w = img2.shape[:2]
+            scale = min(desired_width / w, desired_height / h)
+            if scale < 1:
+                img2_resized = cv2.resize(img2, (int(w * scale), int(h * scale)))
+            else:
+                img2_resized = img2
+            window_name = "Reprojected Points on Camera 2"
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, desired_width, desired_height)
+            cv2.imshow(window_name, img2_resized)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        return points_2d
+
+    
+    def reproject_points_cam2tocam1_known_extrinsics(self, idx, points_3d_cam2, R_2to1, t_2to1, K1, show=True):
+        """
+        Reprojects 3D points from camera 2's coordinate system to camera 1's image plane,
+        using the extrinsics from cam2 to cam1.
+        
+        Args:
+            points_3d_cam2: (N, 3) array of 3D points in camera 2 coordinates
+            R_2to1: (3, 3) rotation matrix from cam2 to cam1
+            t_2to1: (3,) translation vector from cam2 to cam1
+            K1: (3, 3) intrinsic matrix of camera 1
+        
+        Returns:
+            points_2d_cam1: (N, 2) array of 2D points in camera 1 image coordinates
+        """
+        # Transform points from cam2 to cam1 coordinates
+        points_3d_cam1 = (R_2to1 @ points_3d_cam2.T) + t_2to1.reshape(3,1)  # shape (3, N)
+        # Project to cam1 image plane
+        points_2d_hom = K1 @ points_3d_cam1  # shape (3, N)
+        points_2d = (points_2d_hom[:2, :] / points_2d_hom[2, :]).T  # shape (N, 2)
+        cam1_images = sorted(glob.glob(os.path.join(self.cam1.image_dir, "*.jpg")) +
+                             glob.glob(os.path.join(self.cam1.image_dir, "*.png")))
+        img1 = cv2.imread(cam1_images[idx])
+        for proj_pt  in points_2d:
+            proj_pt = tuple(np.round(proj_pt).astype(int))
+            cv2.circle(img1, proj_pt, 5, (0, 0, 255), -1)
+        if show:
+            desired_width = 1600
+            desired_height = 900
+            h, w = img1.shape[:2]
+            scale = min(desired_width / w, desired_height / h)
+            if scale < 1:
+                img2_resized = cv2.resize(img1, (int(w * scale), int(h * scale)))
+            else:
+                img2_resized = img1
+            window_name = "Reprojected Points on Camera 2"
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, desired_width, desired_height)
+            cv2.imshow(window_name, img2_resized)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        return points_2d
+
 def compute_relative_extrinsics(rvec1, tvec1, rvec2, tvec2):
     R1, _ = cv2.Rodrigues(rvec1)
     R2, _ = cv2.Rodrigues(rvec2)
     R_rel = R2 @ R1.T
     t_rel = tvec2 - R_rel @ tvec1
     rvec_rel, _ = cv2.Rodrigues(R_rel)
-    return rvec_rel, t_rel
+    return rvec_rel, R_rel, t_rel
 
 def average_rvecs(rvecs):
         # Convert all rvecs to rotation matrices
@@ -229,6 +316,7 @@ def rvec_to_yaw_pitch_roll(rvec):
 if __name__ == "__main__":
     # Adjust pattern_size to your grid (columns, rows)
     pattern_size = (5, 4)  # circular grid
+    pattern_spacing = 9e-3
 
     focal_length_1 = 50e-3
     pixel_size_1 = 9.3e-6
@@ -264,12 +352,12 @@ if __name__ == "__main__":
     ])
 
     # Calibrate first camera
-    cam1 = CameraCalibrator("CameraData/SyncedCollimatorImages/VIS/", pattern_size, pattern_type='circle')
+    cam1 = CameraCalibrator("CameraData/SyncedCollimatorImages/VIS/", pattern_size, pattern_spacing, pattern_type='circle')
     cam1.find_image_points(visualize=True)
     cam1.calibrate(intrinsics1)
 
     # Calibrate second camera
-    cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR4K/", pattern_size, pattern_type='circle')
+    cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR4K/", pattern_size, pattern_spacing, pattern_type='circle')
     cam2.find_image_points(visualize=True)
     cam2.calibrate(intrinsics2)
 
@@ -280,15 +368,39 @@ if __name__ == "__main__":
     tvec2_avg = average_tvecs(cam2.tvecs)
 
     # Compute relative extrinsics using the averaged values
-    rvec_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
-    print("Relative Rotation Vector (rvec):\n", rvec_rel)
+    rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+    print("Relative Rotation Vector (rvec):\n", R_rel)
     yaw_deg, pitch_deg, roll_deg = rvec_to_yaw_pitch_roll(rvec_rel)
     print(f"Yaw: {yaw_deg:.2f}°, Pitch: {pitch_deg:.2f}°, Roll: {roll_deg:.2f}°")
 
     print("Relative Translation Vector (tvec):\n", t_rel)
 
+    R12 = R_rel
+    R21 = np.linalg.inv(R12)
+
+    T12 = t_rel
+    T21 = -T12
+
     # Reproject points from cam1 to cam2 and visualize
     reprojector = CameraReprojector(cam1, cam2)
     for i in range(0,len(cam1.imgpoints)):
+        # reproject using opencv
         reprojector.reproject_points_cam1tocam2(idx=i, show=True)
         reprojector.reproject_points_cam2tocam1(idx=i, show=True)
+
+        # reproject using matrix multiplications
+        # Convert rvec to rotation matrix
+        R_obj2cam1, _ = cv2.Rodrigues(cam1.rvecs[i])
+        t_obj2cam1 = cam1.tvecs[i].reshape(3, 1)
+        # Transform object points to camera 1 coordinates
+        points_3d_cam1 = (R_obj2cam1 @ (cam1.objpoints[i]).T + t_obj2cam1).T  # shape (N, 3)
+        
+        reprojector.reproject_points_cam1tocam2_known_extrinsics(i, points_3d_cam1, R12, T12, cam2.camera_matrix)
+
+        # Convert rvec to rotation matrix
+        R_obj2cam2, _ = cv2.Rodrigues(cam2.rvecs[i])
+        t_obj2cam2 = cam2.tvecs[i].reshape(3, 1)
+        # Transform object points to camera 1 coordinates
+        points_3d_cam2 = (R_obj2cam2 @ (cam2.objpoints[i]).T + t_obj2cam2).T  # shape (N, 3)
+        
+        reprojector.reproject_points_cam2tocam1_known_extrinsics(i, points_3d_cam2, R21, T21, cam1.camera_matrix)
