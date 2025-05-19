@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import glob
 import os
+from scipy.spatial.transform import Rotation as R
 
 class CameraCalibrator:
     def __init__(self, image_dir, pattern_size, pattern_spacing, pattern_type='circle'):
@@ -216,7 +217,7 @@ class CameraReprojector:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window_name, desired_width, desired_height)
             cv2.imshow(window_name, img2_resized)
-            cv2.waitKey(0)
+            cv2.waitKey(800)
             cv2.destroyAllWindows()
         return points_2d
 
@@ -259,7 +260,7 @@ class CameraReprojector:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window_name, desired_width, desired_height)
             cv2.imshow(window_name, img2_resized)
-            cv2.waitKey(0)
+            cv2.waitKey(800)
             cv2.destroyAllWindows()
         return points_2d
 
@@ -282,6 +283,45 @@ def average_rvecs(rvecs):
         # Convert back to rvec
         rvec_avg, _ = cv2.Rodrigues(R_avg)
         return rvec_avg
+
+def stereo_calibrate(
+    objpoints,          # List of 3D points in world coordinates (e.g., chessboard corners)
+    imgpoints1,         # List of corresponding 2D points in camera 1 images
+    imgpoints2,         # List of corresponding 2D points in camera 2 images
+    cameraMatrix1,      # Intrinsic matrix for camera 1
+    distCoeffs1,        # Distortion coefficients for camera 1
+    cameraMatrix2,      # Intrinsic matrix for camera 2
+    distCoeffs2,        # Distortion coefficients for camera 2
+    imageSize           # (width, height) of calibration images
+):
+    """
+    Perform stereo calibration to obtain relative extrinsics between two cameras.
+
+    Returns:
+        retval: RMS re-projection error
+        R: Rotation matrix from cam1 to cam2
+        T: Translation vector from cam1 to cam2
+        E: Essential matrix
+        F: Fundamental matrix
+    """
+    flags = cv2.CALIB_FIX_INTRINSIC  # Use this if intrinsics are known/fixed
+
+    retval, cameraMatrix1, distCoeffs1, cameraMatrix2, distCoeffs2, \
+    R, T, E, F = cv2.stereoCalibrate(
+        objpoints,
+        imgpoints1,
+        imgpoints2,
+        cameraMatrix1,
+        distCoeffs1,
+        cameraMatrix2,
+        distCoeffs2,
+        imageSize,
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1000, 1e-8),
+        flags=flags
+    )
+
+    return retval, R, T, E, F
+
 
 def average_tvecs(tvecs):
     return np.mean(np.array(tvecs), axis=0)
@@ -324,7 +364,7 @@ if __name__ == "__main__":
     resolution_y_1 = 2160
 
     focal_length_2 = 50e-3
-    pixel_size_2 = 6.044e-6 # 17e-6
+    pixel_size_2 = 6.3e-6 # 17e-6
     resolution_x_2 = 3840 # 1028
     resolution_y_2 = 2160 # 768
 
@@ -353,22 +393,30 @@ if __name__ == "__main__":
 
     # Calibrate first camera
     cam1 = CameraCalibrator("CameraData/SyncedCollimatorImages/VIS/", pattern_size, pattern_spacing, pattern_type='circle')
-    cam1.find_image_points(visualize=True)
+    cam1.find_image_points(visualize=False)
     cam1.calibrate(intrinsics1)
 
     # Calibrate second camera
     cam2 = CameraCalibrator("CameraData/SyncedCollimatorImages/TIR4K/", pattern_size, pattern_spacing, pattern_type='circle')
-    cam2.find_image_points(visualize=True)
+    cam2.find_image_points(visualize=False)
     cam2.calibrate(intrinsics2)
 
-    # Average all rvecs and tvecs for each camera
-    rvec1_avg = average_rvecs(cam1.rvecs)
-    tvec1_avg = average_tvecs(cam1.tvecs)
-    rvec2_avg = average_rvecs(cam2.rvecs)
-    tvec2_avg = average_tvecs(cam2.tvecs)
+    ## Average all rvecs and tvecs for each camera
+    # rvec1_avg = average_rvecs(cam1.rvecs)
+    # tvec1_avg = average_tvecs(cam1.tvecs)
+    # rvec2_avg = average_rvecs(cam2.rvecs)
+    # tvec2_avg = average_tvecs(cam2.tvecs)
 
-    # Compute relative extrinsics using the averaged values
-    rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+    ## Compute relative extrinsics using the averaged values
+    # rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+
+    retval, R_rel, t_rel, E, F = stereo_calibrate(cam1.objpoints, cam1.imgpoints, cam2.imgpoints,
+                                          cam1.camera_matrix, cam1.dist_coeffs, cam2.camera_matrix,cam2.dist_coeffs, (3840, 2160))
+    rvec_rel, _ = cv2.Rodrigues(R_rel)
+    print("Stereo RMS error:", retval)
+    print("Rotation matrix:\n", R_rel)
+    print("Translation vector:\n", t_rel)
+
     print("Relative Rotation Vector (rvec):\n", R_rel)
     yaw_deg, pitch_deg, roll_deg = rvec_to_yaw_pitch_roll(rvec_rel)
     print(f"Yaw: {yaw_deg:.2f}°, Pitch: {pitch_deg:.2f}°, Roll: {roll_deg:.2f}°")
@@ -383,17 +431,18 @@ if __name__ == "__main__":
 
     # Reproject points from cam1 to cam2 and visualize
     reprojector = CameraReprojector(cam1, cam2)
-    for i in range(0,len(cam1.imgpoints)):
+    number_of_images = len(cam1.imgpoints)
+    for i in range(0, number_of_images):
         # reproject using opencv
-        reprojector.reproject_points_cam1tocam2(idx=i, show=True)
-        reprojector.reproject_points_cam2tocam1(idx=i, show=True)
+        # reprojector.reproject_points_cam1tocam2(idx=i, show=True)
+        # reprojector.reproject_points_cam2tocam1(idx=i, show=True)
 
         # reproject using matrix multiplications
         # Convert rvec to rotation matrix
         R_obj2cam1, _ = cv2.Rodrigues(cam1.rvecs[i])
         t_obj2cam1 = cam1.tvecs[i].reshape(3, 1)
         # Transform object points to camera 1 coordinates
-        points_3d_cam1 = (R_obj2cam1 @ (cam1.objpoints[i]).T + t_obj2cam1).T  # shape (N, 3)
+        points_3d_cam1 = (R_obj2cam1 @ (cam1.objpoints[i]).T + t_obj2cam1).T # shape (N, 3)
         
         reprojector.reproject_points_cam1tocam2_known_extrinsics(i, points_3d_cam1, R12, T12, cam2.camera_matrix)
 
