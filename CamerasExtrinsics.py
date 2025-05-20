@@ -181,7 +181,7 @@ class CameraReprojector:
 
         return imgpoints1_proj
 
-    def reproject_points_cam1tocam2_known_extrinsics(self, idx, points_3d_cam1, R_1to2, t_1to2, K2, show=True):
+    def reproject_points_cam1tocam2_known_extrinsics(self, idx, points_3d_cam1, R_1to2, t_1to2, K2, show=True, arun=False):
         """
         Reprojects 3D points from camera 1's coordinate system to camera 2's image plane,
         using the extrinsics from cam1 to cam2.
@@ -200,6 +200,8 @@ class CameraReprojector:
         # Project to cam2 image plane
         points_2d_hom = K2 @ points_3d_cam2  # shape (3, N)
         points_2d = (points_2d_hom[:2, :] / points_2d_hom[2, :]).T  # shape (N, 2)
+        if arun:
+            points_2d = points_2d + np.array([fx2 * t_arun[0], fy2 * t_arun[1]])
         cam2_images = sorted(glob.glob(os.path.join(self.cam2.image_dir, "*.jpg")) +
                              glob.glob(os.path.join(self.cam2.image_dir, "*.png")))
         img2 = cv2.imread(cam2_images[idx])
@@ -224,7 +226,7 @@ class CameraReprojector:
         return points_2d
 
     
-    def reproject_points_cam2tocam1_known_extrinsics(self, idx, points_3d_cam2, R_2to1, t_2to1, K1, show=True):
+    def reproject_points_cam2tocam1_known_extrinsics(self, idx, points_3d_cam2, R_2to1, t_2to1, K1, show=True, arun=False):
         """
         Reprojects 3D points from camera 2's coordinate system to camera 1's image plane,
         using the extrinsics from cam2 to cam1.
@@ -240,9 +242,12 @@ class CameraReprojector:
         """
         # Transform points from cam2 to cam1 coordinates
         points_3d_cam1 = (R_2to1 @ points_3d_cam2.T) + t_2to1.reshape(3,1)  # shape (3, N)
+
         # Project to cam1 image plane
         points_2d_hom = K1 @ points_3d_cam1  # shape (3, N)
         points_2d = (points_2d_hom[:2, :] / points_2d_hom[2, :]).T  # shape (N, 2)
+        if arun:
+            points_2d =  points_2d - (np.array([fx1 * t_arun[0], fy1 * t_arun[1]]))
         cam1_images = sorted(glob.glob(os.path.join(self.cam1.image_dir, "*.jpg")) +
                              glob.glob(os.path.join(self.cam1.image_dir, "*.png")))
         img1 = cv2.imread(cam1_images[idx])
@@ -334,6 +339,32 @@ def normalize_points(points, K):
     points_h = np.hstack([points, np.ones((points.shape[0], 1))])
     norm_points = (K_inv @ points_h.T).T
     return norm_points[:, :2] / norm_points[:, 2][:, None]
+
+def unnormalize_points(norm_points, K):
+    """
+    Convert normalized coordinates to pixel coordinates using the camera matrix K.
+    
+    Args:
+        norm_points: (N, 2) array of normalized coordinates [x', y']
+        K: (3, 3) camera intrinsic matrix
+    
+    Returns:
+        points: (N, 2) array of pixel coordinates [u, v]
+    """
+    # Ensure input is a 2D array
+    norm_points = np.asarray(norm_points)
+    if norm_points.ndim == 1:
+        norm_points = norm_points.reshape(1, -1)
+    
+    # Add homogeneous coordinate (1)
+    norm_points_h = np.hstack([norm_points, np.ones((norm_points.shape[0], 1))])
+    
+    # Apply K to map to pixel coordinates (homogeneous)
+    points_h = (K @ norm_points_h.T).T  # Shape: (N, 3)
+    
+    # Convert to 2D by dividing by the third coordinate
+    points = points_h[:, :2] / points_h[:, 2][:, None]
+    return points
 
 def arun_method(X1, X2):
     """
@@ -546,34 +577,41 @@ if __name__ == "__main__":
     cam2.calibrate(intrinsics2)
 
     ################################################################################
-    # Average all rvecs and tvecs for each camera
-    rvec1_avg = average_rvecs(cam1.rvecs)
-    tvec1_avg = average_tvecs(cam1.tvecs)
-    rvec2_avg = average_rvecs(cam2.rvecs)
-    tvec2_avg = average_tvecs(cam2.tvecs)
+    # # Average all rvecs and tvecs for each camera
+    # rvec1_avg = average_rvecs(cam1.rvecs)
+    # tvec1_avg = average_tvecs(cam1.tvecs)
+    # rvec2_avg = average_rvecs(cam2.rvecs)
+    # tvec2_avg = average_tvecs(cam2.tvecs)
 
-    # Compute relative extrinsics using the averaged values
-    rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
+    # # Compute relative extrinsics using the averaged values
+    # rvec_rel, R_rel, t_rel = compute_relative_extrinsics(rvec1_avg, tvec1_avg, rvec2_avg, tvec2_avg)
     #####################################################################################################
 
     # retval, R_rel, t_rel, E, F = stereo_calibrate(cam1.objpoints, cam1.imgpoints, cam2.imgpoints,
     #                                       cam1.camera_matrix, cam1.dist_coeffs, cam2.camera_matrix,cam2.dist_coeffs, (3840, 2160))
 
     ###########################################################################
-    # cam1_first_points = np.array([arr[0, 0] for arr in cam1.imgpoints])
-    # cam2_first_points = np.array([arr[0, 0] for arr in cam2.imgpoints])
+    cam1_first_points = np.array([arr[0, 0] for arr in cam1.imgpoints])
+    cam2_first_points = np.array([arr[0, 0] for arr in cam2.imgpoints])
 
-    # cam1_norm_point = normalize_points(cam1_first_points, cam1.camera_matrix)
-    # cam2_norm_point = normalize_points(cam2_first_points, cam2.camera_matrix)
+    cam1_norm_point = normalize_points(cam1_first_points, cam1.camera_matrix)
+    cam2_norm_point = normalize_points(cam2_first_points, cam2.camera_matrix)
 
-    # scale_arun, R_arun, t_arun = arun_similarity_transform(cam1_norm_point, cam2_norm_point)
+    scale_arun, R_arun, t_arun = arun_similarity_transform(cam1_norm_point, cam2_norm_point)
 
     # roll, yaw, pitch = extract_angles_from_arun(R_arun, t_arun)
-
+        
+    R_rel = np.eye(3)
+    R_rel[:2, :2] = R_arun
+        
+    # t_arun_unnormalized = unnormalize_points(t_arun, cam1.camera_matrix)
+    
     # R_rel = euler_to_rotation_matrix(yaw, pitch, roll)
-    # t_rel = np.array([-0.05, 0.05, -0.05])
+    # t_rel = np.append(t_arun[0]*fx1, t_arun[1]*fy1)
+    # t_rel = np.append(t_rel, 0)
+    t_rel = np.array([0,0,0])
 
-    # visualize_alignment(cam1_norm_point, cam2_norm_point, scale_arun, R_arun, t_arun)
+    visualize_alignment(cam1_norm_point, cam2_norm_point, scale_arun, R_arun, t_arun)
     #######################################################################################
 
     rvec_rel, _ = cv2.Rodrigues(R_rel)
@@ -609,7 +647,7 @@ if __name__ == "__main__":
         # Transform object points to camera 1 coordinates
         points_3d_cam1 = (R_obj2cam1 @ (cam1.objpoints[i]).T + t_obj2cam1).T # shape (N, 3)
         
-        reprojector.reproject_points_cam1tocam2_known_extrinsics(i, points_3d_cam1, R12, T12, cam2.camera_matrix)
+        reprojector.reproject_points_cam1tocam2_known_extrinsics(i, points_3d_cam1, R12, T12, cam2.camera_matrix, arun=True)
 
         # Convert rvec to rotation matrix
         R_obj2cam2, _ = cv2.Rodrigues(cam2.rvecs[i])
@@ -617,4 +655,4 @@ if __name__ == "__main__":
         # Transform object points to camera 1 coordinates
         points_3d_cam2 = (R_obj2cam2 @ (cam2.objpoints[i]).T + t_obj2cam2).T  # shape (N, 3)
         
-        reprojector.reproject_points_cam2tocam1_known_extrinsics(i, points_3d_cam2, R21, T21, cam1.camera_matrix)
+        reprojector.reproject_points_cam2tocam1_known_extrinsics(i, points_3d_cam2, R21, T21, cam1.camera_matrix, arun=True)
